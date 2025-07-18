@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-
+import argparse
+import configparser
+import logging
+import subprocess
+import re
 from icalendar import Calendar, Event
 import requests
 import datetime
@@ -7,8 +11,13 @@ from dateutil.rrule import *
 import pytz
 import locale
 import os
-import smtplib
 from dateutil.parser import parse
+from pathlib import Path
+
+# email sending
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 class Event:
@@ -19,6 +28,45 @@ class Event:
         self.created = created
         self.updated = updated
         self.id = id
+
+    def __str__(self):
+        return (
+            f"Event:\n"
+            f"  Name: {self.name}\n"
+            f"  Start Time: {self.start_time}\n"
+            f"  End Time: {self.end_time}\n"
+            f"  Created: {self.created}\n"
+            f"  Updated: {self.updated}\n"
+            f"  ID: {self.id}"
+        )
+
+
+def send_email(subject, content):
+    sender_email = config['EMAIL']['SENDER']
+    recipient_emails = recipients  # seznam příjemců, např. ['email1@example.com', 'email2@example.com']
+    smtp_server = config['EMAIL']['SMTP_SERVER']
+    smtp_port = int(config['EMAIL']['SMTP_PORT'])
+    smtp_username = config['EMAIL']['SMTP_USERNAME']
+    smtp_password = config['EMAIL']['SMTP_PASSWORD']
+
+    # Sestavení emailu
+    message = MIMEMultipart("alternative")
+    message["Subject"] = subject
+    message["From"] = sender_email
+    message["To"] = ", ".join(recipient_emails)
+
+    # Přidání HTML obsahu
+    html_part = MIMEText(content, "html")
+    message.attach(html_part)
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()  # Zapnout TLS
+            server.login(smtp_username, smtp_password)
+            server.sendmail(sender_email, recipient_emails, message.as_string())
+        print("Email byl odeslán.")
+    except Exception as exp:
+        logging.error(f"Sending failed: {repr(exp)}")
 
 
 def print_all_events(all_events):
@@ -56,6 +104,12 @@ def print_specific_upcoming_events_to_textfile(all_events, keywords, file_locati
 def print_specific_events_to_textfile(all_events, keywords, file_location):
     with open(file_location, 'w', encoding='utf-8') as f:
         for event in all_events:
+            # tmp fix SOLIDA
+            if 'bystřec' not in event.name.lower() and 'solida' in event.name.lower():
+                compiled = re.compile(re.escape('solida'), re.IGNORECASE)
+                res = compiled.sub('SOLIDA Bystřec', event.name)
+                event.name = res
+
             if all(keyword.lower() in event.name.lower() for keyword in keywords):
                 f.write('{0};{1};{2};{3};{4};{5}\n'
                     .format(
@@ -81,7 +135,6 @@ def print_available_events_to_textfile(events, file_location):
                         events[i].end_time - events[i].start_time
                     )
                 )
-
 
             time_space = events[i + 1].start_time.replace(tzinfo=pytz.UTC) - events[i].end_time.replace(tzinfo=pytz.UTC)
             if time_space > datetime.timedelta(minutes=15) and events[i].start_time.replace(tzinfo=pytz.UTC) > datetime.datetime.now(datetime.timezone.utc):
@@ -206,14 +259,24 @@ def parse_czech_date_to_valid_format(czechdate):
 
 
 def check_news(prefix, filename):
-    old_content = open('{0}/{1}.backup'.format(prefix, filename), 'r').read()
+    if not Path(f'{prefix}/{filename}.backup').is_file():
+        old_content = ''
+        old_lines = []
+    else:
+        old_content = open('{0}/{1}.backup'.format(prefix, filename), 'r').read()
+        with open('{0}/{1}.backup'.format(prefix, filename), 'r') as f:
+            old_lines = f.readlines()
+
     new_content = open('{0}/{1}'.format(prefix, filename), 'r').read()
 
     if old_content == new_content:
         return
 
-    with open('{0}/{1}.backup'.format(prefix, filename), 'r') as f:
-        old_lines = f.readlines()
+    if not Path(f'{prefix}/{filename}.backup').is_file():
+        old_lines = []
+    else:
+        with open('{0}/{1}.backup'.format(prefix, filename), 'r') as f:
+            old_lines = f.readlines()
 
     old_events = []
     for line in old_lines:
@@ -242,7 +305,6 @@ def check_news(prefix, filename):
         tmp_event.id = splitted[5]
         new_events.append(tmp_event)
 
-
     new_events_ids = get_ids_of_events_list(new_events)
     old_events_ids = get_ids_of_events_list(old_events)
     ids_added = list(set(new_events_ids) - set(old_events_ids))
@@ -265,7 +327,7 @@ def check_news(prefix, filename):
 
     for id in ids_removed:
         event = get_event_by_id(old_events, id)
-        if event.start_time.replace(tzinfo=None) < datetime.datetime.now():
+        if event.start_time.replace(tzinfo=None) > datetime.datetime.now():
             message = 'Událost začala<br>\n' \
                       '<br>\n' \
                       'Název: {0}<br>\n' \
@@ -288,9 +350,6 @@ def check_news(prefix, filename):
             )
             send_email('Hockey Calendar Reader - Událost zrušena', message)
 
-
-
-
     for new_event in new_events:
         old_event = get_event_by_id(old_events, new_event.id)
         if old_event is not None:
@@ -303,63 +362,35 @@ def check_news(prefix, filename):
                           '<br>\n' \
                           'Původní název: {3}<br>\n' \
                           'Původně od: {4}<br>\n' \
-                          'Původně do: {5}<br>\n '.format(
+                          'Původně do: {5}<br>\n' \
+                          '---<br>\n' \
+                          '---<br>\n' \
+                          'old:<br>\n' \
+                          '{6}<br>\n' \
+                          'new:<br>\n' \
+                          '{7}<br>\n'.format(
                     new_event.name,
                     new_event.start_time.strftime('%A %d.%m.%Y %H:%M:%S'),
                     new_event.end_time.strftime('%A %d.%m.%Y %H:%M:%S'),
                     old_event.name,
                     old_event.start_time.strftime('%A %d.%m.%Y %H:%M:%S'),
-                    old_event.end_time.strftime('%A %d.%m.%Y %H:%M:%S')
+                    old_event.end_time.strftime('%A %d.%m.%Y %H:%M:%S'),
+                    old_event,
+                    new_event
                 )
                 send_email('Hockey Calendar Reader - Událost aktualizována', message)
 
 
 def backup_file(prefix, filename):
-    os.system("mv {0}/{1} {0}/{1}.backup".format(prefix, filename))
-
-
-def send_email(subject, content):
-    # Replace end sequence chars in subject
-    for item in ["\n", "\r"]:
-        subject = subject.replace(item, ' ')
-
-    headers = {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Content-Disposition': 'inline',
-        'Content-Transfer-Encoding': '8bit',
-        'From': '',
-        'To': '',
-        'Date': datetime.datetime.now().strftime('%a, %d %b %Y  %H:%M:%S %Z'),
-        'X-Mailer': 'python',
-        'Subject': subject
-    }
-
-    # create the message
-    message = ''
-    for key, value in headers.items():
-        message += "%s: %s\n" % (key, value)
-
-    # add contents
-    message += "\n%s\n" % (content)
-
-    s = smtplib.SMTP('smtp.gmail.com', 587)
-
-    s.ehlo()
-    s.starttls()
-    s.ehlo()
-
-    s.login('', '')
-
-    print("sending %s to %s" % (subject, headers['To']))
-    s.sendmail(headers['From'], headers['To'], message.encode("utf8"))
+    if Path(f'{prefix}/{filename}').is_file():
+        os.system("mv {0}/{1} {0}/{1}.backup".format(prefix, filename))
 
 
 def get_events_from_calendar(calendar_id):
-    api_key = ''
     url = 'https://www.googleapis.com/calendar/v3/calendars/' + calendar_id + '/events'
 
     PARAMS = {
-        'key': api_key,
+        'key': config['CALENDAR']['API_KEY'],
         'singleEvents': 'True',
         'timeMin': datetime.datetime.now().isoformat() + 'Z',
         'orderBy': 'startTime',
@@ -394,14 +425,30 @@ def get_events_from_calendar(calendar_id):
         tmp_event.updated = parse(event['updated'])
 
         all_events.append(tmp_event)
-
+    
     return all_events
 
 
-def main():
+def clean_temp_files():
+    subprocess.run(['rm', '-rf', config['GENERAL']['OUTPUT_DIR']])
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Hockey-calendar-reader started')
+    parser.add_argument('--config', required=True, help='Path to config file')
+    args = parser.parse_args()
+    config = configparser.ConfigParser()
+    config.read(args.config)
+    logging.basicConfig(filename=config['GENERAL']['LOG'], format='%(asctime)s %(levelname)s %(message)s', level=logging.DEBUG)
+    logging.info('Bazoš started')
+    recipients = config['GENERAL']['RECIPIENTS'].split(' ')
     locale.setlocale(locale.LC_ALL, "cs_CZ.UTF-8")
     global local_tz
     local_tz = pytz.timezone('Europe/Prague')
+
+    #clean_temp_files()
+
+    Path(config['GENERAL']['OUTPUT_DIR']).mkdir(parents=True, exist_ok=True)
 
     LA_calendar_id = 'halabmlan@gmail.com'
     CT_calendar_id = 'n7i0r6c4810701q9f4ffvpbjd8@group.calendar.google.com'
@@ -409,61 +456,72 @@ def main():
     upcoming_events_ceska_trebova = get_events_from_calendar(CT_calendar_id)
     upcoming_events_lanskroun = get_events_from_calendar(LA_calendar_id)
 
-    prefix_path = '/var/www/my_web/hockey_events/'
-
-    backup_file(prefix_path, 'hrdina-la.txt')
-    backup_file(prefix_path, 'bystrec-la.txt')
-    backup_file(prefix_path, 'bystrec-ct.txt')
-    backup_file(prefix_path, 'zapasy-lhl-bystrec.txt')
-    backup_file(prefix_path, 'zapasy-chl-bystrec.txt')
+    #prefix_path = '/var/www/my_web/hockey_events/'
+    output_dir = config['GENERAL']['OUTPUT_DIR']
+    backup_file(output_dir, 'hrdina-la.txt')
+    backup_file(output_dir, 'bystrec-la.txt')
+    backup_file(output_dir, 'bystrec-ct.txt')
+    backup_file(output_dir, 'zapasy-lhl-bystrec.txt')
+    backup_file(output_dir, 'zapasy-chl-bystrec.txt')
+    backup_file(output_dir, 'bys.txt')
 
     # Ledy - Hrdina
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Hrdina'], prefix_path + 'hrdina-la.txt')
-    generate_html_from_text_file(prefix_path, 'hrdina-la.txt', 'hrdina-la.html', 'Ledy na jméno Hrdina v Lanškrouně')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Hrdina'], f'{output_dir}/hrdina-la.txt')
+    generate_html_from_text_file(output_dir, 'hrdina-la.txt', 'hrdina-la.html', 'Ledy na jméno Hrdina v Lanškrouně')
 
     # Volné bruslení
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['volné bruslení'], prefix_path + 'brusleni-la.txt')
-    generate_html_from_text_file(prefix_path, 'brusleni-la.txt', 'brusleni-la.html', 'Volné bruslení v Lanškrouně')
-    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['VEŘEJNÉ BRUSLENÍ'], prefix_path + 'brusleni-ct.txt')
-    generate_html_from_text_file(prefix_path, 'brusleni-ct.txt', 'brusleni-ct.html', 'Volné bruslení v České Třebové')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['volné bruslení'], f'{output_dir}/brusleni-la.txt')
+    generate_html_from_text_file(output_dir, 'brusleni-la.txt', 'brusleni-la.html', 'Volné bruslení v Lanškrouně')
+    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['VEŘEJNÉ BRUSLENÍ'],
+                                      output_dir + '/' + 'brusleni-ct.txt')
+    generate_html_from_text_file(output_dir, 'brusleni-ct.txt', 'brusleni-ct.html', 'Volné bruslení v České Třebové')
 
     # Ledy - Bystřec
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Bystřec'], prefix_path + 'bystrec-la.txt')
-    generate_html_from_text_file(prefix_path, 'bystrec-la.txt', 'bystrec-la.html', 'Ledy na jméno Bystřec v Lanškrouně')
-    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['Bystřec'], prefix_path + 'bystrec-ct.txt')
-    generate_html_from_text_file(prefix_path, 'bystrec-ct.txt', 'bystrec-ct.html', 'Ledy na jméno Bystřec v České Třebové')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Bystřec'], f'{output_dir}/bystrec-la.txt')
+    generate_html_from_text_file(output_dir, 'bystrec-la.txt', 'bystrec-la.html', 'Ledy na jméno Bystřec v Lanškrouně')
+    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['Bystřec'], f'{output_dir}/bystrec-ct.txt')
+    generate_html_from_text_file(output_dir, 'bystrec-ct.txt', 'bystrec-ct.html',
+                                 'Ledy na jméno Bystřec v České Třebové')
+    # Ledy - Bys
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Bys'], f'{output_dir}/bys.txt')
+    generate_html_from_text_file(output_dir, 'bys.txt', 'bys.html', 'Ledy na jméno Bystřec v Lanškrouně')
+
 
     # Příchozí
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['příchozí'], prefix_path + 'prichozi-la.txt')
-    generate_html_from_text_file(prefix_path, 'prichozi-la.txt', 'prichozi-la.html', 'Hokej pro příchozí v Lanškrouně')
-    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['příchozí'], prefix_path + 'prichozi-ct.txt')
-    generate_html_from_text_file(prefix_path, 'prichozi-ct.txt', 'prichozi-ct.html', 'Hokej pro příchozí v České Třebové')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['příchozí'], f'{output_dir}/prichozi-la.txt')
+    generate_html_from_text_file(output_dir, 'prichozi-la.txt', 'prichozi-la.html', 'Hokej pro příchozí v Lanškrouně')
+    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['příchozí'], f'{output_dir}/prichozi-ct.txt')
+    generate_html_from_text_file(output_dir, 'prichozi-ct.txt', 'prichozi-ct.html',
+                                 'Hokej pro příchozí v České Třebové')
 
     # Naše LHL a CHL zápasy
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Bystřec', 'LHL'], prefix_path + 'zapasy-lhl-bystrec.txt')
-    generate_html_from_text_file(prefix_path, 'zapasy-lhl-bystrec.txt', 'zapasy-lhl-bystrec.html', 'Zápasy LHL')
-    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['CHL', 'SOLIDA'], prefix_path + 'zapasy-chl-bystrec.txt')
-    generate_html_from_text_file(prefix_path, 'zapasy-chl-bystrec.txt', 'zapasy-chl-bystrec.html', 'Zápasy CHL')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['Bystřec', 'LHL'],
+                                      f'{output_dir}/zapasy-lhl-bystrec.txt')
+    generate_html_from_text_file(output_dir, 'zapasy-lhl-bystrec.txt', 'zapasy-lhl-bystrec.html', 'Zápasy LHL')
+    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['CHL', 'Bystřec'],
+                                      f'{output_dir}/zapasy-chl-bystrec.txt')
+    generate_html_from_text_file(output_dir, 'zapasy-chl-bystrec.txt', 'zapasy-chl-bystrec.html', 'Zápasy CHL')
 
     # LHL a CHL zápasy
-    print_specific_events_to_textfile(upcoming_events_lanskroun, ['LHL č.'], prefix_path + 'zapasy-lhl.txt')
-    generate_html_from_text_file(prefix_path, 'zapasy-lhl.txt', 'zapasy-lhl.html', 'Zápasy LHL')
-    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['CHL'], prefix_path + 'zapasy-chl.txt')
-    generate_html_from_text_file(prefix_path, 'zapasy-chl.txt', 'zapasy-chl.html', 'Zápasy CHL')
+    print_specific_events_to_textfile(upcoming_events_lanskroun, ['LHL č.'], f'{output_dir}/zapasy-lhl.txt')
+    generate_html_from_text_file(output_dir, 'zapasy-lhl.txt', 'zapasy-lhl.html', 'Zápasy LHL')
+    print_specific_events_to_textfile(upcoming_events_ceska_trebova, ['CHL'], f'{output_dir}/zapasy-chl.txt')
+    generate_html_from_text_file(output_dir, 'zapasy-chl.txt', 'zapasy-chl.html', 'Zápasy CHL')
 
     # Available events
-    print_available_events_to_textfile(upcoming_events_lanskroun, prefix_path + 'available-la.txt')
-    generate_html_from_text_file_available_events(prefix_path, 'available-la.txt', 'available-la.html', 'Volné termíny v Lanškrouně')
-    print_available_events_to_textfile(upcoming_events_ceska_trebova, prefix_path + 'available-ct.txt')
-    generate_html_from_text_file_available_events(prefix_path, 'available-ct.txt', 'available-ct.html', 'Volné termíny v České Třebové')
+    print_available_events_to_textfile(upcoming_events_lanskroun, f'{output_dir}/available-la.txt')
+    generate_html_from_text_file_available_events(output_dir, 'available-la.txt', 'available-la.html',
+                                                  'Volné termíny v Lanškrouně')
+    print_available_events_to_textfile(upcoming_events_ceska_trebova, f'{output_dir}/available-ct.txt')
+    generate_html_from_text_file_available_events(output_dir, 'available-ct.txt', 'available-ct.html',
+                                                  'Volné termíny v České Třebové')
 
-    check_news(prefix_path, 'hrdina-la.txt')
-    check_news(prefix_path, 'bystrec-la.txt')
-    check_news(prefix_path, 'bystrec-ct.txt')
-    check_news(prefix_path, 'zapasy-lhl-bystrec.txt')
-    check_news(prefix_path, 'zapasy-chl-bystrec.txt')
+    check_news(output_dir, 'hrdina-la.txt')
+    check_news(output_dir, 'bystrec-la.txt')
+    check_news(output_dir, 'bystrec-ct.txt')
+    check_news(output_dir, 'zapasy-lhl-bystrec.txt')
+    check_news(output_dir, 'zapasy-chl-bystrec.txt')
 
+    logging.info('Script ended')
 
-if __name__ == '__main__':
-    main()
-
+    #clean_temp_files()
