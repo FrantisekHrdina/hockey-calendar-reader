@@ -42,12 +42,12 @@ class Event:
 
 
 def send_email(subject, content):
-    sender_email = config['EMAIL']['SENDER']
+    sender_email = config['EMAIL-BREVO']['SENDER']
     recipient_emails = recipients  # seznam příjemců, např. ['email1@example.com', 'email2@example.com']
-    smtp_server = config['EMAIL']['SMTP_SERVER']
-    smtp_port = int(config['EMAIL']['SMTP_PORT'])
-    smtp_username = config['EMAIL']['SMTP_USERNAME']
-    smtp_password = config['EMAIL']['SMTP_PASSWORD']
+    smtp_server = config['EMAIL-BREVO']['SMTP_SERVER']
+    smtp_port = int(config['EMAIL-BREVO']['SMTP_PORT'])
+    smtp_username = config['EMAIL-BREVO']['SMTP_LOGIN']
+    smtp_password = config['EMAIL-BREVO']['SMTP_PASSWORD']
 
     # Sestavení emailu
     message = MIMEMultipart("alternative")
